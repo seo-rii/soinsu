@@ -21,7 +21,11 @@ bits 784..829    len 46
 bits 920..923    len 4
 ```
 
-The preferred attack brute-forces the two 4-bit blocks and groups the remaining unknowns into two variables:
+Two cuso paths should be tried before spending more time on SAT-ledger
+enumeration.
+
+The legacy grouped path brute-forces the two 4-bit blocks and groups the
+remaining unknowns into two variables:
 
 ```text
 x = p[265..419]      155-bit grouped variable
@@ -29,7 +33,18 @@ y = p[600..829]      230-bit grouped variable
 p = p0 + 2^265*x + 2^600*y
 ```
 
-Then each of the 256 `(low, high)` candidates is solved as a bivariate Coppersmith/Herrmann-May problem modulo an unknown divisor `p` of the known multiple `N`.
+Then each of the 256 `(low, high)` candidates is solved as a bivariate
+Coppersmith/Herrmann-May problem modulo an unknown divisor `p` of the known
+multiple `N`.
+
+The split-block path keeps the exact unknown block structure.  With
+`--cuso-split-brute-small-edges`, the two 4-bit edge blocks are brute-forced and
+the remaining five blocks become independent cuso variables:
+
+```text
+edge brute force: 150:4, 920:4
+cuso variables:   265:84, 362:58, 600:69, 682:87, 784:46
+```
 
 ## Fast path: Sage + cuso
 
@@ -37,16 +52,35 @@ Install the dependencies described in `env/setup_external.md`, then run:
 
 ```bash
 sage -python src/solve7_main.py --mode analyze
-sage -python src/solve7_main.py --mode cuso --a 0 --b 256 | tee logs/cuso_full.log
+mkdir -p logs/ct07_cuso
+
+# Smoke the grouped and split cuso modes first.  These smoke commands may
+# return "not found" for a single candidate; inspect the logs for cuso import,
+# graph, lattice, or root-search errors.
+bash scripts/smoke_cuso_modes.sh logs/ct07_cuso/smoke
+
+# Full grouped 2-variable sweep.
+bash scripts/run_cuso_grouped_8way.sh logs/ct07_cuso/grouped
+
+# Full split exact-block sweep with 4-bit edge brute force.
+bash scripts/run_cuso_split_edges_8way.sh logs/ct07_cuso/split_edges
 ```
 
-To split across workers, candidate id is `cid = 16*high + low`:
+To split the grouped path manually, candidate id is `cid = 16*high + low`:
 
 ```bash
 bash scripts/run_cuso_range.sh 0 64
 bash scripts/run_cuso_range.sh 64 128
 bash scripts/run_cuso_range.sh 128 192
 bash scripts/run_cuso_range.sh 192 256
+```
+
+The split path also accepts `--a/--b`, but those are edge-id ranges rather than
+grouped candidate-id ranges:
+
+```bash
+sage -python src/solve7_main.py --mode cuso-split \
+  --cuso-split-brute-small-edges --a 0 --b 32
 ```
 
 ## Local fallback

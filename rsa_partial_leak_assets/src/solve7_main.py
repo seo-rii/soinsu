@@ -76,35 +76,27 @@ def decrypt_known(phex):
         return 2
     return 0
 
+def cuso_find_small_roots_compat(cuso, relations, bounds, **kwargs):
+    try:
+        return cuso.find_small_roots(relations=relations, bounds=bounds, **kwargs)
+    except TypeError as ex:
+        msg=str(ex)
+        if (
+            'relations' in msg
+            or 'bounds' in msg
+            or 'unexpected keyword' in msg
+            or 'positional argument' in msg
+        ):
+            return cuso.find_small_roots(relations, bounds, **kwargs)
+        raise
+
 def cuso_run(a,b,cuso_log=None,use_graph_optimization=None,use_intermediate_sizes=True,allow_partial_solutions=False):
     if cuso_log:
         import logging
         logging.basicConfig(level=getattr(logging, cuso_log), format='%(asctime)s %(levelname)s %(name)s: %(message)s')
     from sage.all import var
     import cuso
-    # cuso 0.4.0 expects Sage MPolynomial generators to expose
-    # is_generator(), but Sage 10.9's libsingular generators do not.
-    from cuso.data.bounds.bound import Bound
-    from cuso.data.bounds.bound_set import BoundSet
-    from sage.all import Expression, Integer, Polynomial as SagePolynomial
-    from sage.rings.polynomial.multi_polynomial import MPolynomial
-    def _boundset_setitem(self, key, value):
-        type_error_s = "Keys must be symbols or generators of a polynomial ring"
-        if isinstance(key, MPolynomial):
-            if key not in key.parent().gens():
-                raise TypeError(type_error_s)
-        elif isinstance(key, SagePolynomial):
-            if not key.is_gen():
-                raise TypeError(type_error_s)
-        elif isinstance(key, Expression):
-            if not key.is_symbol():
-                raise TypeError(type_error_s)
-        else:
-            raise TypeError(type_error_s)
-        if not isinstance(value, Bound):
-            value = Bound(key, *value)
-        super(BoundSet, self).__setitem__(key, value)
-    BoundSet.__setitem__ = _boundset_setitem
+    _patch_cuso_boundset_for_sage109()
     x,y=var('x y')
     def get(root,k):
         for kk in (k,str(k)):
@@ -118,8 +110,10 @@ def cuso_run(a,b,cuso_log=None,use_graph_optimization=None,use_intermediate_size
         print(f'try cid={cid:03d} lo={lo:x} hi={hi:x}', flush=True)
         f=C + A*x + B*y
         t0=time.time()
-        roots=cuso.find_small_roots(
-            relations=[f], bounds={x:(0,X), y:(0,Y)},
+        roots=cuso_find_small_roots_compat(
+            cuso,
+            [f],
+            {x:(0,X), y:(0,Y)},
             modulus='p', modulus_multiple=N,
             modulus_lower_bound=1<<1023, modulus_upper_bound=1<<1024,
             use_graph_optimization=use_graph_optimization,
@@ -166,6 +160,8 @@ def cuso_split_run(
     use_intermediate_sizes=True,
     allow_partial_solutions=False,
     brute_small_edges=False,
+    edge_start=0,
+    edge_stop=None,
 ):
     if cuso_log:
         import logging
@@ -176,6 +172,10 @@ def cuso_split_run(
     fixed_edge_blocks=[block for block in UNKNOWN_BLOCKS if brute_small_edges and block[2] <= 4]
     blocks=[block for block in UNKNOWN_BLOCKS if block not in fixed_edge_blocks]
     edge_space=1<<sum(width for _,_,width in fixed_edge_blocks)
+    if edge_stop is None:
+        edge_stop=edge_space
+    edge_start=max(0, edge_start)
+    edge_stop=min(edge_space, edge_stop)
     names=[f'x{i}' for i in range(len(blocks))]
     R=PolynomialRing(ZZ, names)
     gens=R.gens()
@@ -184,8 +184,8 @@ def cuso_split_run(
     if fixed_edge_blocks:
         print('bruteforced edge blocks:', ', '.join(f'{start}:{width}' for start,_,width in fixed_edge_blocks), flush=True)
     print('unknown bits in split model =', sum(width for _,_,width in blocks), flush=True)
-    print('edge attempts =', edge_space, flush=True)
-    for edge_id in range(edge_space):
+    print('edge attempts =', edge_stop-edge_start, '/', edge_space, flush=True)
+    for edge_id in range(edge_start, edge_stop):
         base=LEAK
         for start,_,width in UNKNOWN_BLOCKS:
             base &= ~(((1<<width)-1)<<start)
@@ -204,9 +204,10 @@ def cuso_split_run(
             f += R(1<<start)*gen
             bounds[gen]=(0,1<<width)
         t0=time.time()
-        roots=cuso.find_small_roots(
-            relations=[f],
-            bounds=bounds,
+        roots=cuso_find_small_roots_compat(
+            cuso,
+            [f],
+            bounds,
             modulus='p',
             modulus_multiple=N,
             modulus_lower_bound=1<<1023,
@@ -345,6 +346,8 @@ if __name__=='__main__':
             not args.cuso_no_intermediate,
             args.cuso_allow_partial,
             args.cuso_split_brute_small_edges,
+            args.a,
+            args.b,
         ))
     if args.mode in ('auto','cuso'):
         graph=None if args.cuso_graph=='auto' else args.cuso_graph=='on'

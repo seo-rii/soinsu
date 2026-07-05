@@ -1,0 +1,50 @@
+partial 0 vars 1376 clauses 2
+partial 256 vars 5472 clauses 12290
+partial 768 vars 310624 clauses 927746
+initial terms 675840 vars 361824 clauses 1081346 time 1.5037951469421387
+reduce 0 vars 361824 clauses 1081347 xors 0 next 1
+reduce 256 vars 392332 clauses 1172779 xors 15254 next 233
+reduce 512 vars 509444 clauses 1523783 xors 73810 next 626
+reduce 768 vars 713196 clauses 2134692 xors 175686 next 1028
+reduce 1024 vars 1017256 clauses 3046687 xors 327716 next 1318
+reduce 1280 vars 1324156 clauses 3967223 xors 481166 next 1086
+reduce 1536 vars 1544452 clauses 4628187 xors 591314 next 693
+reduce 1792 vars 1678108 clauses 5029246 xors 658142 next 291
+reduce 2048 vars 1711456 clauses 5129218 xors 674816 next 0
+built vars 1711456 clauses 5129218 xors 674816
+TRY 0 low high 0 0 pref 192 sat None time 9.161269187927246
+timeout candidate 0 0
+TRY 1 low high 1 0 pref 192 sat None time 5.221884727478027
+timeout candidate 1 0
+TRY 2 low high 2 0 pref 192 sat None time 5.320962429046631
+timeout candidate 2 0
+TRY 3 low high 3 0 pref 192 sat None time 7.060065269470215
+timeout candidate 3 0
+TRY 4 low high 4 0 pref 192 sat None time 5.495862245559692
+timeout candidate 4 0
+TRY 5 low high 5 0 pref 192 sat None time 5.194653511047363
+timeout candidate 5 0
+TRY 6 low high 6 0 pref 192 sat None time 5.2373223304748535
+timeout candidate 6 0
+TRY 7 low high 7 0 pref 192 sat None time 5.262748956680298
+timeout candidate 7 0
+TRY 8 low high 8 0 pref 192 sat None time 7.971792221069336
+timeout candidate 8 0
+TRY 9 low high 9 0 pref 192 sat None time 5.440697431564331
+timeout candidate 9 0
+TRY 10 low high 10 0 pref 192 sat None time 6.222244739532471
+timeout candidate 10 0
+TRY 11 low high 11 0 pref 192 sat None time 5.328742980957031
+timeout candidate 11 0
+TRY 12 low high 12 0 pref 192 sat None time 5.370929479598999
+timeout candidate 12 0
+TRY 13 low high 13 0 pref 192 sat None time 5.216928720474243
+timeout candidate 13 0
+TRY 14 low high 14 0 pref 192 sat None time 5.272201299667358
+timeout candidate 14 0
+TRY 15 low high 15 0 pref 192 sat None time 5.57386326789856
+timeout candidate 15 0
+TRY 16 low high 0 1 pref 193 sat None time 5.274952173233032
+timeout candidate 0 1
+TRY 17 low high 1 1 pref 193 sat None time 5.980768203735352
+timeout candidate 1 1

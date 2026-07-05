@@ -1,0 +1,5 @@
+# Ubuntu/Sage environment example
+# Install SageMath 9.8+, flatter, msolve first.
+git clone https://github.com/keeganryan/cuso.git
+cd cuso && sage -python -m pip install .
+sage -python ../solve7_cuso_compact.py

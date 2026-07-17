@@ -1,0 +1,794 @@
+diff --git a/maplesat/core/Solver.cc b/maplesat/core/Solver.cc
+index a9b829a..90cea9a 100644
+--- a/maplesat/core/Solver.cc
++++ b/maplesat/core/Solver.cc
+@@ -29,11 +29,16 @@ OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWA
+ #include <gmp.h>
+ #include <cstring>
+ #include <fplll.h>
++#include <flatter/flatter.h>
++#include <flatter/computation_context.h>
++#include <flatter/data/matrix.h>
++#include <flatter/problems/lattice_reduction.h>
+ //#include "flint/fmpz_polyxx.h"
+ #include "flint/flint.h"
+ #include "flint/fmpz.h"
+ #include "flint/fmpz_poly.h"
+ #include "flint/fmpz_poly_factor.h"
++#include "flint/fmpz_mpoly.h"
+
+
+ #include <math.h>
+@@ -198,7 +203,10 @@ void Solver::setInstanceVariables()
+ {
+     mpz_init_set_str(mpz_NUM, cb_num.c_str(), 10);
+     mpz_inits(mpz_X, pq_temp, p_temp, q_temp, pow2, pow4, inv_factor, NULL);
+-    mpz_root(mpz_X, mpz_NUM, 5);
++    // h = t = 32.  For a balanced factor beta = 1/2, the univariate
++    // Howgrave-Graham bound used by this basis is X = N^(16/65) / 4.
++    mpz_root(mpz_X, mpz_NUM, 65);
++    mpz_pow_ui(mpz_X, mpz_X, 16);
+     mpz_tdiv_q_2exp(mpz_X, mpz_X, 2);
+     prime_len = p_msb_var;
+     p_msb_count = prime_len - (mpz_sizeinbase(mpz_X, 2) - 1); // Subtract 1 as mpz_sizeinbase(mpz_X, 2) gives floor(lg(X))+1
+@@ -437,142 +445,399 @@ void nCr(mpz_t rop, int n, int r, mpz_t p_tilda) {
+     mpz_clears(t1, t2, NULL);
+ }
+
+-bool coppersmith(mpz_t p_tilda_num, int is_lsb) {
++bool coppersmith(mpz_t affine_base, int is_lsb, unsigned int len_knownbits = 0) {
+     cs_count += 1;
+-    mpz_t prime, t, t2, p_tilda, mpz_val;
+-    unsigned int len_knownbits = p_msb_count, h = 2, k;
+-    k = 2*h;
++    const unsigned int h = 32;
++    const unsigned int k = 2 * h;
++    const unsigned int dimension = k + 1;
++    if(len_knownbits == 0)
++        len_knownbits = p_msb_count;
+
+-    mpz_inits(prime, t, t2, p_tilda, mpz_val, NULL);
++    mpz_t prime, t, t2, p_tilda, mpz_val, inv_scale;
++    mpz_inits(prime, t, t2, p_tilda, mpz_val, inv_scale, NULL);
+
+     if(is_lsb) {
+-        mpz_mul(p_tilda, inv_factor, p_tilda_num);
+-        mpz_mod(p_tilda, p_tilda, mpz_NUM); // Reduce constant term mod N
++        // affine_base contains every known low and high bit.  With
++        // p = affine_base + 2^len_knownbits*x, make x + c monic modulo N.
++        mpz_set_ui(inv_scale, 1);
++        mpz_mul_2exp(inv_scale, inv_scale, len_knownbits);
++        if(mpz_invert(inv_scale, inv_scale, mpz_NUM) == 0) {
++            mpz_clears(prime, t, t2, p_tilda, mpz_val, inv_scale, NULL);
++            return false;
++        }
++        mpz_mul(p_tilda, inv_scale, affine_base);
++        mpz_mod(p_tilda, p_tilda, mpz_NUM);
+     } else {
+-        mpz_set(p_tilda, p_tilda_num);
++        mpz_set(p_tilda, affine_base);
+     }
+
+-    mpz_t polys[k+1][k+1];
+-    for(int i = 0; i < k+1; i++) {
+-        for(int j = 0; j < k+1; j++) {
++    mpz_t polys[dimension][dimension];
++    for(unsigned int i = 0; i < dimension; i++)
++        for(unsigned int j = 0; j < dimension; j++)
+             mpz_init(polys[i][j]);
+-        }
+-    }
+
+-    int z;
++    unsigned int z = 0;
+     mpz_t coeff;
+     mpz_init(coeff);
+-
+-    for(int i = 0; i < h+1; i++) {
++    for(unsigned int i = 0; i <= h; i++) {
+         mpz_pow_ui(t, mpz_NUM, h-i);
+-        for(int j = 0; j < i+1; j++) {
++        for(unsigned int j = 0; j <= i; j++) {
+             nCr(t2, i, j, p_tilda);
+             mpz_mul(coeff, t, t2);
+             mpz_pow_ui(t2, mpz_X, j);
+-            mpz_mul(coeff, coeff, t2);
+-            mpz_set(polys[i][j], coeff);
++            mpz_mul(polys[i][j], coeff, t2);
+         }
+         z = i;
+     }
+     z++;
+-    for(int i = 1; i < k-h+1; i++) {
+-        for(int j = 0; j < h+1; j++) {
++    for(unsigned int i = 1; i <= k-h; i++) {
++        for(unsigned int j = 0; j <= h; j++) {
+             nCr(t, h, j, p_tilda);
+             mpz_set(polys[z][j+i], t);
+         }
+-        for(int j = 0; j < h+i+1; j++) {
++        for(unsigned int j = 0; j <= h+i; j++) {
+             mpz_pow_ui(t2, mpz_X, j);
+-            mpz_mul(coeff, polys[z][j], t2);
+-            mpz_set(polys[z][j], coeff);
++            mpz_mul(polys[z][j], polys[z][j], t2);
+         }
+         z++;
+     }
+-
+     mpz_clear(coeff);
+
+-    ZZ_mat<mpz_t> * FPlllMat;
+-    Z_NR<mpz_t>  zval;
+-
+-    FPlllMat = new ZZ_mat<mpz_t>(k+1,k+1);
+-
+-    for(int i = 0; i < k+1; i++) {
+-      for(int j = 0; j < k+1; j++) {
+-        zval = polys[i][j];
+-        (*FPlllMat)[i][j] = zval;
+-      }
++    ZZ_mat<mpz_t> reduced(dimension, dimension);
++    Z_NR<mpz_t> zval;
++    for(unsigned int i = 0; i < dimension; i++) {
++        for(unsigned int j = 0; j < dimension; j++) {
++            zval = polys[i][j];
++            reduced[i][j] = zval;
++        }
+     }
+
+-    lll_reduction(*FPlllMat, LLL_DEF_DELTA, LLL_DEF_ETA, LM_WRAPPER, FT_DEFAULT, 0, LLL_DEFAULT);
++    // fplll stores basis vectors in rows; libflatter stores them in columns.
++    // The explicit transpose in both directions is essential (and was the
++    // reason an earlier direct-libflatter experiment reduced the wrong basis).
++    static bool flatter_initialized = false;
++    if(!flatter_initialized) {
++        flatter::initialize();
++        flatter_initialized = true;
++    }
++    flatter::Matrix flatter_basis(flatter::MPZ, dimension, dimension);
++    flatter::Matrix flatter_transform(flatter::MPZ, dimension, dimension);
++    flatter_transform.set_identity();
++    flatter::MatrixData<mpz_t> basis_data = flatter_basis.data<mpz_t>();
++    for(unsigned int row = 0; row < dimension; row++) {
++        for(unsigned int col = 0; col < dimension; col++) {
++            reduced[row][col].get_mpz(t);
++            mpz_set(basis_data(col, row), t);
++        }
++    }
++    flatter::Lattice lattice(flatter_basis);
++    flatter::LatticeReductionParams flatter_params(lattice, flatter_transform, 1.0219, false);
++    flatter::ComputationContext flatter_context(4);
++    flatter::LatticeReduction flatter_reduction(flatter_params, flatter_context);
++    flatter_reduction.solve();
++    flatter::MatrixData<mpz_t> reduced_data = lattice.basis().data<mpz_t>();
++    for(unsigned int row = 0; row < dimension; row++) {
++        for(unsigned int col = 0; col < dimension; col++) {
++            mpz_set(t, reduced_data(col, row));
++            zval = t;
++            reduced[row][col] = zval;
++        }
++    }
+
++    bool found = false;
+     fmpz_poly_t pol;
+     fmpz_poly_init(pol);
+-
+-    mpz_t red_coef, temp_var;
+-    mpz_inits(red_coef, temp_var, NULL);
+-
+-    fmpz_t fmpz_var;
+-    fmpz_init(fmpz_var);
+-
+-    for(int i=0; i<k+1; i++) {
+-        (*FPlllMat)[0][i].get_mpz(red_coef);
+-        mpz_pow_ui(temp_var, mpz_X, i);
+-        mpz_div(red_coef, red_coef, temp_var);
+-        fmpz_set_mpz(fmpz_var, red_coef);
+-        fmpz_poly_set_coeff_fmpz(pol, i, fmpz_var);
+-    }
+-
+-    mpz_clears(temp_var, red_coef, NULL);
+-
+     fmpz_poly_factor_t factors;
+     fmpz_poly_factor_init(factors);
+-
+-    fmpz_poly_factor_zassenhaus(factors, pol);
+-
+-    for(int i = 0; i < factors->num; i++)
+-    {
+-        if(fmpz_poly_degree(&factors->p[i]) == 1 && fmpz_poly_get_coeff_ui(&factors->p[i], 1) == 1) {
++    fmpz_t fmpz_var;
++    fmpz_init(fmpz_var);
++    mpz_t red_coef, x_power, linear_a, linear_b;
++    mpz_inits(red_coef, x_power, linear_a, linear_b, NULL);
++
++    // A useful integer-root polynomial is not necessarily the first reduced
++    // vector.  Scan every reduced row, as required for the larger h=t=32 basis.
++    for(unsigned int row = 0; row < dimension && !found; row++) {
++        fmpz_poly_zero(pol);
++        for(unsigned int i = 0; i < dimension; i++) {
++            reduced[row][i].get_mpz(red_coef);
++            mpz_pow_ui(x_power, mpz_X, i);
++            mpz_divexact(red_coef, red_coef, x_power);
++            fmpz_set_mpz(fmpz_var, red_coef);
++            fmpz_poly_set_coeff_fmpz(pol, i, fmpz_var);
++        }
++        if(fmpz_poly_degree(pol) < 1)
++            continue;
++        fmpz_poly_factor_clear(factors);
++        fmpz_poly_factor_init(factors);
++        fmpz_poly_factor_zassenhaus(factors, pol);
++        for(slong i = 0; i < factors->num && !found; i++) {
++            if(fmpz_poly_degree(&factors->p[i]) != 1)
++                continue;
++            fmpz_poly_get_coeff_fmpz(fmpz_var, &factors->p[i], 1);
++            fmpz_get_mpz(linear_a, fmpz_var);
+             fmpz_poly_get_coeff_fmpz(fmpz_var, &factors->p[i], 0);
+-            fmpz_get_mpz(mpz_val, fmpz_var);
+-            if(mpz_cmp_ui(mpz_val, 0)!=0)
+-            {
+-                mpz_mul_si(mpz_val, mpz_val, -1);
+-                if(is_lsb) {
+-                    mpz_mul_2exp(prime, mpz_val, len_knownbits);
+-                    mpz_add(prime, prime, p_tilda_num);
+-                } else {
+-                    mpz_add(prime, p_tilda_num, mpz_val);
+-                }
+-                if(mpz_divisible_p(mpz_NUM, prime)) {
+-                    val = true;
+-                    printf("============================================================================================"); if(opt_prog_hc) printf("============="); printf("\n");
+-                    gmp_printf("The result from Coppersmith is - %Zd\n", mpz_val);
+-                    gmp_printf("One of the factors of N is - %Zd\n", prime);
+-                    break;
+-                } else {
+-                    val = false;
+-                }
++            fmpz_get_mpz(linear_b, fmpz_var);
++            mpz_neg(linear_b, linear_b);
++            if(mpz_sgn(linear_a) == 0 || !mpz_divisible_p(linear_b, linear_a))
++                continue;
++            mpz_divexact(mpz_val, linear_b, linear_a);
++            if(mpz_sgn(mpz_val) < 0 || mpz_cmp(mpz_val, mpz_X) >= 0)
++                continue;
++            if(is_lsb) {
++                mpz_mul_2exp(prime, mpz_val, len_knownbits);
++                mpz_add(prime, prime, affine_base);
++            } else {
++                mpz_add(prime, affine_base, mpz_val);
++            }
++            if(mpz_cmp_ui(prime, 1) > 0 && mpz_divisible_p(mpz_NUM, prime)) {
++                found = true;
++                printf("=========================================================================================================\n");
++                gmp_printf("The result from Coppersmith is - %Zd\n", mpz_val);
++                gmp_printf("One of the factors of N is - %Zd\n", prime);
+             }
+-        } else {
+-            val = false;
+         }
+     }
+
++    mpz_clears(red_coef, x_power, linear_a, linear_b, NULL);
+     fmpz_clear(fmpz_var);
+-
+     fmpz_poly_factor_clear(factors);
+     fmpz_poly_clear(pol);
++    for(unsigned int i = 0; i < dimension; i++)
++        for(unsigned int j = 0; j < dimension; j++)
++            mpz_clear(polys[i][j]);
++    mpz_clears(prime, t, t2, p_tilda, mpz_val, inv_scale, NULL);
++    return found;
++}
+
+-    for(int i = 0; i < k+1; i++) {
+-      for(int j = 0; j < k+1; j++) {
+-        mpz_clear(polys[i][j]);
+-      }
++// Bivariate Herrmann--May oracle for the soinsu challenge after fixing the
++// two four-bit edges and p[784..829].  The remaining unknown spans are
++//
++//   p = constant + 2^265*x + 2^600*y, |x| < 2^155, |y| < 2^169.
++//
++// m=8,t=2 gives a 45-dimensional triangular shift basis.  Reduced rows are
++// converted to FLINT bivariate polynomials; two resultants and their gcd
++// normally expose y-y0, then specialization exposes x-x0.
++bool bivariate_highguess_coppersmith(mpz_t constant) {
++    const unsigned int m = 8;
++    const unsigned int t_exp = 2;
++    const unsigned int dimension = 45;
++    const unsigned int x_shift = 265;
++    const unsigned int y_shift = 600;
++    const unsigned int x_width = 155;
++    const unsigned int y_width = 169;
++
++    vector<pair<unsigned int, unsigned int> > monomials;
++    for(unsigned int degree = 0; degree <= m; degree++)
++        for(unsigned int x_degree = 0; x_degree <= degree; x_degree++)
++            monomials.push_back(make_pair(x_degree, degree-x_degree));
++    if(monomials.size() != dimension)
++        return false;
++
++    int column_index[m+1][m+1];
++    for(unsigned int i = 0; i <= m; i++)
++        for(unsigned int j = 0; j <= m; j++)
++            column_index[i][j] = -1;
++    for(unsigned int column = 0; column < dimension; column++)
++        column_index[monomials[column].first][monomials[column].second] = column;
++
++    mpz_t inv_x, f_constant, f_y, coefficient, temporary, choose1, choose2, n_factor;
++    mpz_inits(inv_x, f_constant, f_y, coefficient, temporary, choose1, choose2, n_factor, NULL);
++    mpz_set_ui(inv_x, 1);
++    mpz_mul_2exp(inv_x, inv_x, x_shift);
++    if(mpz_invert(inv_x, inv_x, mpz_NUM) == 0) {
++        mpz_clears(inv_x, f_constant, f_y, coefficient, temporary, choose1, choose2, n_factor, NULL);
++        return false;
++    }
++    mpz_mul(f_constant, constant, inv_x);
++    mpz_mod(f_constant, f_constant, mpz_NUM);
++    mpz_set_ui(f_y, 1);
++    mpz_mul_2exp(f_y, f_y, y_shift);
++    mpz_mul(f_y, f_y, inv_x);
++    mpz_mod(f_y, f_y, mpz_NUM);
++
++    ZZ_mat<mpz_t> reduced(dimension, dimension);
++    Z_NR<mpz_t> z_value;
++    unsigned int row = 0;
++    for(unsigned int k = 0; k <= m; k++) {
++        if(k < t_exp)
++            mpz_pow_ui(n_factor, mpz_NUM, t_exp-k);
++        else
++            mpz_set_ui(n_factor, 1);
++        for(unsigned int y_extra = 0; y_extra <= m-k; y_extra++) {
++            for(unsigned int i = 0; i <= k; i++) {
++                for(unsigned int j = 0; j <= k-i; j++) {
++                    const unsigned int constant_degree = k-i-j;
++                    mpz_bin_uiui(choose1, k, i);
++                    mpz_bin_uiui(choose2, k-i, j);
++                    mpz_mul(coefficient, choose1, choose2);
++                    mpz_pow_ui(temporary, f_y, j);
++                    mpz_mul(coefficient, coefficient, temporary);
++                    mpz_pow_ui(temporary, f_constant, constant_degree);
++                    mpz_mul(coefficient, coefficient, temporary);
++                    mpz_mul(coefficient, coefficient, n_factor);
++                    const unsigned int final_y_degree = j+y_extra;
++                    mpz_mul_2exp(coefficient, coefficient,
++                        x_width*i + y_width*final_y_degree);
++                    const int column = column_index[i][final_y_degree];
++                    if(column < 0) {
++                        mpz_clears(inv_x, f_constant, f_y, coefficient, temporary,
++                                   choose1, choose2, n_factor, NULL);
++                        return false;
++                    }
++                    z_value = coefficient;
++                    reduced[row][column] = z_value;
++                }
++            }
++            row++;
++        }
++    }
++    if(row != dimension) {
++        mpz_clears(inv_x, f_constant, f_y, coefficient, temporary,
++                   choose1, choose2, n_factor, NULL);
++        return false;
+     }
+
+-    mpz_clears(prime, t, t2, p_tilda, mpz_val, NULL);
++    const int lll_status = lll_reduction(
++        reduced, 0.99, 0.51, LM_PROVED, FT_MPFR, 256, LLL_DEFAULT);
++    if(lll_status != RED_SUCCESS) {
++        mpz_clears(inv_x, f_constant, f_y, coefficient, temporary,
++                   choose1, choose2, n_factor, NULL);
++        return false;
++    }
++
++    const unsigned int polynomial_count = 12;
++    fmpz_mpoly_ctx_t context;
++    fmpz_mpoly_ctx_init(context, 2, ORD_LEX);
++    fmpz_mpoly_t polynomials[polynomial_count];
++    fmpz_t flint_coefficient;
++    fmpz_init(flint_coefficient);
++    for(unsigned int polynomial = 0; polynomial < polynomial_count; polynomial++) {
++        fmpz_mpoly_init(polynomials[polynomial], context);
++        for(unsigned int column = 0; column < dimension; column++) {
++            reduced[polynomial][column].get_mpz(coefficient);
++            const unsigned int i = monomials[column].first;
++            const unsigned int j = monomials[column].second;
++            mpz_tdiv_q_2exp(coefficient, coefficient, x_width*i + y_width*j);
++            if(mpz_sgn(coefficient) == 0)
++                continue;
++            fmpz_set_mpz(flint_coefficient, coefficient);
++            const ulong exponents[2] = {i, j};
++            fmpz_mpoly_set_coeff_fmpz_ui(
++                polynomials[polynomial], flint_coefficient, exponents, context);
++        }
++    }
+
+-    delete FPlllMat;
++    fmpz_mpoly_t resultant_mpoly;
++    fmpz_mpoly_init(resultant_mpoly, context);
++    fmpz_poly_t resultant_poly, primitive, gcd_y;
++    fmpz_poly_init(resultant_poly);
++    fmpz_poly_init(primitive);
++    fmpz_poly_init(gcd_y);
++    bool have_gcd_y = false;
++    unsigned int resultant_count = 0;
++    for(unsigned int left = 0; left < 6 && (!have_gcd_y || fmpz_poly_degree(gcd_y) > 1); left++) {
++        for(unsigned int right = left+1; right < polynomial_count; right++) {
++            if(!fmpz_mpoly_resultant(
++                    resultant_mpoly, polynomials[left], polynomials[right], 0, context))
++                continue;
++            if(fmpz_mpoly_is_zero(resultant_mpoly, context) ||
++               !fmpz_mpoly_get_fmpz_poly(resultant_poly, resultant_mpoly, 1, context))
++                continue;
++            fmpz_poly_primitive_part(primitive, resultant_poly);
++            if(fmpz_poly_degree(primitive) < 1)
++                continue;
++            resultant_count++;
++            if(!have_gcd_y) {
++                fmpz_poly_set(gcd_y, primitive);
++                have_gcd_y = true;
++            } else {
++                fmpz_poly_gcd(gcd_y, gcd_y, primitive);
++            }
++            if(fmpz_poly_degree(gcd_y) <= 1)
++                break;
++        }
++    }
+
+-    return val;
++    bool found = false;
++    mpz_t y_root, x_root, linear_a, linear_b, prime;
++    mpz_inits(y_root, x_root, linear_a, linear_b, prime, NULL);
++    if(have_gcd_y && resultant_count >= 1 && fmpz_poly_degree(gcd_y) == 1) {
++        fmpz_poly_get_coeff_fmpz(flint_coefficient, gcd_y, 1);
++        fmpz_get_mpz(linear_a, flint_coefficient);
++        fmpz_poly_get_coeff_fmpz(flint_coefficient, gcd_y, 0);
++        fmpz_get_mpz(linear_b, flint_coefficient);
++        mpz_neg(linear_b, linear_b);
++        if(mpz_sgn(linear_a) != 0 && mpz_divisible_p(linear_b, linear_a)) {
++            mpz_divexact(y_root, linear_b, linear_a);
++            if(mpz_sgn(y_root) >= 0 && mpz_sizeinbase(y_root, 2) <= y_width) {
++                fmpz_t flint_y;
++                fmpz_init(flint_y);
++                fmpz_set_mpz(flint_y, y_root);
++                fmpz_mpoly_t specialized;
++                fmpz_mpoly_init(specialized, context);
++                fmpz_poly_t specialized_poly, specialized_primitive, gcd_x;
++                fmpz_poly_init(specialized_poly);
++                fmpz_poly_init(specialized_primitive);
++                fmpz_poly_init(gcd_x);
++                bool have_gcd_x = false;
++                for(unsigned int polynomial = 0; polynomial < polynomial_count; polynomial++) {
++                    if(!fmpz_mpoly_evaluate_one_fmpz(
++                            specialized, polynomials[polynomial], 1, flint_y, context) ||
++                       !fmpz_mpoly_get_fmpz_poly(specialized_poly, specialized, 0, context))
++                        continue;
++                    fmpz_poly_primitive_part(specialized_primitive, specialized_poly);
++                    if(fmpz_poly_degree(specialized_primitive) < 1)
++                        continue;
++                    if(!have_gcd_x) {
++                        fmpz_poly_set(gcd_x, specialized_primitive);
++                        have_gcd_x = true;
++                    } else {
++                        fmpz_poly_gcd(gcd_x, gcd_x, specialized_primitive);
++                    }
++                    if(fmpz_poly_degree(gcd_x) <= 1)
++                        break;
++                }
++                if(have_gcd_x && fmpz_poly_degree(gcd_x) == 1) {
++                    fmpz_poly_get_coeff_fmpz(flint_coefficient, gcd_x, 1);
++                    fmpz_get_mpz(linear_a, flint_coefficient);
++                    fmpz_poly_get_coeff_fmpz(flint_coefficient, gcd_x, 0);
++                    fmpz_get_mpz(linear_b, flint_coefficient);
++                    mpz_neg(linear_b, linear_b);
++                    if(mpz_sgn(linear_a) != 0 && mpz_divisible_p(linear_b, linear_a)) {
++                        mpz_divexact(x_root, linear_b, linear_a);
++                        if(mpz_sgn(x_root) >= 0 && mpz_sizeinbase(x_root, 2) <= x_width) {
++                            mpz_mul_2exp(prime, x_root, x_shift);
++                            mpz_add(prime, prime, constant);
++                            mpz_mul_2exp(temporary, y_root, y_shift);
++                            mpz_add(prime, prime, temporary);
++                            if(mpz_cmp_ui(prime, 1) > 0 && mpz_divisible_p(mpz_NUM, prime)) {
++                                found = true;
++                                gmp_printf("Bivariate high-guess factor: %Zd\n", prime);
++                            }
++                        }
++                    }
++                }
++                fmpz_poly_clear(gcd_x);
++                fmpz_poly_clear(specialized_primitive);
++                fmpz_poly_clear(specialized_poly);
++                fmpz_mpoly_clear(specialized, context);
++                fmpz_clear(flint_y);
++            }
++        }
++    }
++
++    mpz_clears(y_root, x_root, linear_a, linear_b, prime, NULL);
++    fmpz_poly_clear(gcd_y);
++    fmpz_poly_clear(primitive);
++    fmpz_poly_clear(resultant_poly);
++    fmpz_mpoly_clear(resultant_mpoly, context);
++    for(unsigned int polynomial = 0; polynomial < polynomial_count; polynomial++)
++        fmpz_mpoly_clear(polynomials[polynomial], context);
++    fmpz_clear(flint_coefficient);
++    fmpz_mpoly_ctx_clear(context);
++    mpz_clears(inv_x, f_constant, f_y, coefficient, temporary,
++               choose1, choose2, n_factor, NULL);
++    return found;
+ }
+
+ long next_cs_call = 0;
+@@ -591,7 +856,228 @@ long next_cs_call = 0;
+ void Solver::callbackFunction(bool complete, vec<vec<Lit> >& out_learnts, Lit& branch_lit) {
+     if(opt_only_sat) return;
+
+-    if(opt_prog_hc) { // Programmatic Heninger/Shacham branching option (not used in ISSAC'24 paper)
++    // The soinsu instance has a contiguous known-or-guessed 255-bit prefix
++    // p[769..1023].  Guess the two holes first so that the two-sided
++    // Coppersmith call and the quotient-interval guidance become available.
++    const int hybrid_high_start = 769;
++    const int hybrid_high_end = 1023;
++    const int hybrid_high_bits = hybrid_high_end - hybrid_high_start + 1;
++    const bool hybrid_layout = prime_len == 1024 && p_msb_var - (p_lsb_var - 1) == prime_len;
++    int hybrid_low_bits = p_msb_count - hybrid_high_bits;
++    if(hybrid_low_bits < 1)
++        hybrid_low_bits = 1;
++
++    if(hybrid_layout) {
++        // Challenge-specific bivariate lane.  Only the 8 edge bits and the
++        // 46-bit top high-hole block need SAT decisions before a 45D HM call.
++        if(opt_lo) {
++            const int bivariate_priority[][2] = {
++                {150, 153}, {920, 923}, {784, 829}
++            };
++            for(unsigned int range = 0; range < 3; range++) {
++                for(int bit = bivariate_priority[range][0];
++                    bit <= bivariate_priority[range][1]; bit++) {
++                    const int pvar = p_lsb_var - 1 + bit;
++                    if(assigns[pvar] == l_Undef) {
++                        branch_lit = mkLit(pvar, polarity[pvar]);
++                        return;
++                    }
++                }
++            }
++
++            bool constant_ready = true;
++            for(int bit = 0; bit < prime_len; bit++) {
++                if((bit >= 265 && bit <= 419) || (bit >= 600 && bit <= 768))
++                    continue;
++                if(assigns[p_lsb_var - 1 + bit] == l_Undef) {
++                    constant_ready = false;
++                    break;
++                }
++            }
++            if(constant_ready && next_cs_call <= conflicts) {
++                next_cs_call = conflicts + 1;
++                mpz_t bivariate_constant;
++                mpz_init_set_ui(bivariate_constant, 0);
++                for(int bit = 0; bit < prime_len; bit++) {
++                    if((bit >= 265 && bit <= 419) || (bit >= 600 && bit <= 768))
++                        continue;
++                    if(assigns[p_lsb_var - 1 + bit] == l_True)
++                        mpz_setbit(bivariate_constant, bit);
++                }
++
++                cs_count++;
++                cs_count_lsb_p1++;
++                const double start = cpuTime();
++                const bool result = bivariate_highguess_coppersmith(bivariate_constant);
++                const double elapsed = cpuTime() - start;
++                cs_time += elapsed;
++                printf("BIVAR call=%ld result=%s seconds=%.6f conflicts=%" PRIu64 "\n",
++                       cs_count, result ? "factor" : "no-factor", elapsed, conflicts);
++                fflush(stdout);
++                if(result) {
++                    cout << "Bivariate high-guess Coppersmith Successful!" << endl;
++                    printStats();
++                    printf("\nSATISFIABLE\n");
++                    exit(10);
++                }
++
++                // Exclude the current 54-bit edge/high-hole choice.  All
++                // other bits contributing to the constant are fixed by the
++                // public leak, so they need not enlarge the learned clause.
++                const int learned_index = out_learnts.size();
++                out_learnts.push();
++                for(unsigned int range = 0; range < 3; range++) {
++                    for(int bit = bivariate_priority[range][0];
++                        bit <= bivariate_priority[range][1]; bit++) {
++                        const int pvar = p_lsb_var - 1 + bit;
++                        out_learnts[learned_index].push(
++                            mkLit(pvar, assigns[pvar] == l_True));
++                    }
++                }
++                mpz_clear(bivariate_constant);
++                return;
++            }
++            if(constant_ready)
++                return;
++        }
++
++        const int priority_ranges[][2] = {{920, 923}, {784, 829}};
++        for(unsigned int range = 0; range < 2; range++) {
++            for(int bit = priority_ranges[range][0]; bit <= priority_ranges[range][1]; bit++) {
++                const int pvar = p_lsb_var - 1 + bit;
++                if(assigns[pvar] == l_Undef) {
++                    branch_lit = mkLit(pvar, polarity[pvar]);
++                    return;
++                }
++            }
++        }
++
++        bool high_ready = true;
++        for(int bit = hybrid_high_start; bit <= hybrid_high_end; bit++) {
++            if(assigns[p_lsb_var - 1 + bit] == l_Undef) {
++                high_ready = false;
++                break;
++            }
++        }
++        bool low_ready = true;
++        for(int bit = 0; bit < hybrid_low_bits; bit++) {
++            if(assigns[p_lsb_var - 1 + bit] == l_Undef) {
++                low_ready = false;
++                break;
++            }
++        }
++
++        if(opt_lo && high_ready && low_ready && next_cs_call <= conflicts) {
++            next_cs_call = conflicts + 1;
++            mpz_t affine_base;
++            mpz_init_set_ui(affine_base, 0);
++            for(int bit = 0; bit < hybrid_low_bits; bit++)
++                if(assigns[p_lsb_var - 1 + bit] == l_True)
++                    mpz_setbit(affine_base, bit);
++            for(int bit = hybrid_high_start; bit <= hybrid_high_end; bit++)
++                if(assigns[p_lsb_var - 1 + bit] == l_True)
++                    mpz_setbit(affine_base, bit);
++
++            cs_count_lsb_p1++;
++            const double start = cpuTime();
++            const bool res = coppersmith(affine_base, 1, hybrid_low_bits);
++            cs_time += cpuTime() - start;
++            if(res) {
++                cout << "Coppersmith Successful!" << endl;
++                cout << "Result from combined p[0.." << hybrid_low_bits-1
++                     << "] and p[769..1023] bits" << endl;
++                cout << "Coppersmith was called " + to_string(cs_count) + " times." << endl;
++                printStats();
++                printf("\nSATISFIABLE\n");
++                exit(10);
++            }
++
++            // Failed candidate: exclude exactly this low-prefix/high-prefix
++            // combination.  Every literal below is the negation of the
++            // current assignment, so it is an immediate programmatic conflict.
++            const int size = out_learnts.size();
++            out_learnts.push();
++            for(int bit = 0; bit < hybrid_low_bits; bit++) {
++                const int pvar = p_lsb_var - 1 + bit;
++                out_learnts[size].push(mkLit(pvar, assigns[pvar] == l_True));
++            }
++            for(int bit = hybrid_high_start; bit <= hybrid_high_end; bit++) {
++                const int pvar = p_lsb_var - 1 + bit;
++                out_learnts[size].push(mkLit(pvar, assigns[pvar] == l_True));
++            }
++            mpz_clear(affine_base);
++            return;
++        }
++
++        // Quotient interval: every completion of the currently assigned p bits
++        // lies in [p_min,p_max], hence q=N/p lies in
++        // [ceil(N/p_max), floor(N/p_min)].  A common MSB of that entire interval
++        // is a sound guided q decision.  If q already contradicts it, learn the
++        // conditional implication from all currently fixed p bits.
++        if(high_ready) {
++            mpz_t p_min, p_max, q_min, q_max, tmp, width_min, width_max, diff;
++            mpz_inits(p_min, p_max, q_min, q_max, tmp, width_min, width_max, diff, NULL);
++            for(int bit = 0; bit < prime_len; bit++) {
++                const lbool assigned = assigns[p_lsb_var - 1 + bit];
++                if(assigned == l_True)
++                    mpz_setbit(p_min, bit);
++                if(assigned != l_False)
++                    mpz_setbit(p_max, bit);
++            }
++            if(mpz_sgn(p_min) > 0) {
++                mpz_cdiv_q(q_min, mpz_NUM, p_max);
++                mpz_fdiv_q(q_max, mpz_NUM, p_min);
++                mpz_set_ui(width_min, 1);
++                mpz_mul_2exp(width_min, width_min, prime_len-1);
++                mpz_set_ui(width_max, 1);
++                mpz_mul_2exp(width_max, width_max, prime_len);
++                mpz_sub_ui(width_max, width_max, 1);
++                if(mpz_cmp(q_min, width_min) < 0)
++                    mpz_set(q_min, width_min);
++                if(mpz_cmp(q_max, width_max) > 0)
++                    mpz_set(q_max, width_max);
++
++                if(mpz_cmp(q_min, q_max) <= 0) {
++                    mpz_xor(diff, q_min, q_max);
++                    const int first_noncommon = mpz_sgn(diff) == 0 ? 0 : mpz_sizeinbase(diff, 2);
++                    for(int bit = prime_len-1; bit >= first_noncommon; bit--) {
++                        const int qvar = q_lsb_var - 1 + bit;
++                        const bool expected = mpz_tstbit(q_min, bit) != 0;
++                        if(assigns[qvar] == l_Undef) {
++                            branch_lit = mkLit(qvar, !expected);
++                            mpz_clears(p_min, p_max, q_min, q_max, tmp, width_min, width_max, diff, NULL);
++                            return;
++                        }
++                        if((assigns[qvar] == l_True) != expected) {
++                            const int size = out_learnts.size();
++                            out_learnts.push();
++                            for(int pbit = 0; pbit < prime_len; pbit++) {
++                                const int pvar = p_lsb_var - 1 + pbit;
++                                if(assigns[pvar] != l_Undef)
++                                    out_learnts[size].push(mkLit(pvar, assigns[pvar] == l_True));
++                            }
++                            out_learnts[size].push(mkLit(qvar, !expected));
++                            mpz_clears(p_min, p_max, q_min, q_max, tmp, width_min, width_max, diff, NULL);
++                            return;
++                        }
++                    }
++                } else {
++                    const int size = out_learnts.size();
++                    out_learnts.push();
++                    for(int pbit = 0; pbit < prime_len; pbit++) {
++                        const int pvar = p_lsb_var - 1 + pbit;
++                        if(assigns[pvar] != l_Undef)
++                            out_learnts[size].push(mkLit(pvar, assigns[pvar] == l_True));
++                    }
++                    mpz_clears(p_min, p_max, q_min, q_max, tmp, width_min, width_max, diff, NULL);
++                    return;
++                }
++            }
++            mpz_clears(p_min, p_max, q_min, q_max, tmp, width_min, width_max, diff, NULL);
++        }
++    }
++
++    if(opt_prog_hc && (!hybrid_layout || bit_i < hybrid_low_bits)) { // Programmatic Heninger/Shacham branching option
+         double hc_start = cpuTime();
+         int plsb = p_lsb_var - 1 + bit_i;
+         int qlsb = q_lsb_var - 1 + bit_i;
+@@ -605,7 +1091,8 @@ void Solver::callbackFunction(bool complete, vec<vec<Lit> >& out_learnts, Lit& b
+             total_hc++; // Total number of recomputions
+         }
+
+-        while(assigns[plsb]!=l_Undef && assigns[qlsb]!=l_Undef && bit_i < prime_len-1)
++        const int hc_stop = hybrid_layout ? hybrid_low_bits : prime_len-1;
++        while(assigns[plsb]!=l_Undef && assigns[qlsb]!=l_Undef && bit_i < hc_stop)
+         {
+             if(assigns[qlsb] == l_True) {
+                 mpz_addmul(pq_temp, p_temp, pow2);
+@@ -637,7 +1124,11 @@ void Solver::callbackFunction(bool complete, vec<vec<Lit> >& out_learnts, Lit& b
+
+         // Determine if the Heninger/Shacham constraints imply the value of an unassigned variable;
+         // If so, then branch on that variable.
+-        if(assigns[plsb]==l_Undef && assigns[qlsb]==l_True) {
++        if(assigns[plsb]==l_Undef && assigns[qlsb]==l_Undef) {
++            // No parity value is forced yet, but deciding p_i here lets the
++            // next callback derive q_i and keeps the low frontier progressive.
++            branch_lit = mkLit(plsb, bitValue == 0);
++        } else if(assigns[plsb]==l_Undef && assigns[qlsb]==l_True) {
+             branch_lit = mkLit(plsb, bitValue == 0);
+         } else if(assigns[plsb]==l_Undef && assigns[qlsb]==l_False) {
+             branch_lit = mkLit(plsb, bitValue == 1);
+@@ -655,7 +1146,7 @@ void Solver::callbackFunction(bool complete, vec<vec<Lit> >& out_learnts, Lit& b
+         }
+     }
+
+-    if((opt_lo || opt_hi) && next_cs_call <= conflicts)
++    if(!hybrid_layout && (opt_lo || opt_hi) && next_cs_call <= conflicts)
+     {
+         next_cs_call = conflicts + 1;
+         call_coppersmith_msb_p1 = opt_hi;
+diff --git a/maplesat/mtl/config.mk b/maplesat/mtl/config.mk
+index b5c36fc..7137001 100644
+--- a/maplesat/mtl/config.mk
++++ b/maplesat/mtl/config.mk
+@@ -4,3 +4,6 @@
+ ##
+ ##  CFLAGS += -I/usr/local/include
+ ##  LFLAGS += -L/usr/local/lib
++
++CFLAGS += -I/usr/local/include
++LFLAGS += -L/usr/local/lib -Wl,-rpath,/usr/local/lib -lflatter

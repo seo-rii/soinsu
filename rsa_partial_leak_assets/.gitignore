@@ -1,0 +1,6 @@
+.sage-site/
+.sage-tmp/
+.py-site/
+logs/
+__pycache__/
+*.py[cod]

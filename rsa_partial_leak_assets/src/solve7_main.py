@@ -90,7 +90,30 @@ def cuso_find_small_roots_compat(cuso, relations, bounds, **kwargs):
             return cuso.find_small_roots(relations, bounds, **kwargs)
         raise
 
-def cuso_run(a,b,cuso_log=None,use_graph_optimization=None,use_intermediate_sizes=True,allow_partial_solutions=False):
+def _parse_cuso_upper_segments(specs, model_segments):
+    upper_segments=set()
+    for raw in specs or []:
+        try:
+            start_s,width_s=raw.split(':',1)
+            upper_segments.add((int(start_s,0),int(width_s,0)))
+        except Exception as ex:
+            raise ValueError(f'invalid --cuso-upper-variable {raw!r}; expected START:WIDTH') from ex
+    unknown=upper_segments-set(model_segments)
+    if unknown:
+        labels=', '.join(f'{start}:{width}' for start,width in sorted(unknown))
+        raise ValueError(f'--cuso-upper-variable does not match model variables: {labels}')
+    return upper_segments
+
+def _cuso_origin(start,width,upper_segments,upper_low_variables,upper_all_variables):
+    if upper_all_variables or (upper_low_variables and start+width <= YS) or (start,width) in upper_segments:
+        return 'upper'
+    return 'lower'
+
+def cuso_run(
+    a,b,cuso_log=None,use_graph_optimization=None,use_intermediate_sizes=True,
+    allow_partial_solutions=False,upper_variables=None,upper_low_variables=False,
+    upper_all_variables=False,
+):
     if cuso_log:
         import logging
         logging.basicConfig(level=getattr(logging, cuso_log), format='%(asctime)s %(levelname)s %(name)s: %(message)s')
@@ -98,6 +121,10 @@ def cuso_run(a,b,cuso_log=None,use_graph_optimization=None,use_intermediate_size
     import cuso
     _patch_cuso_boundset_for_sage109()
     x,y=var('x y')
+    upper_segments=_parse_cuso_upper_segments(upper_variables, [(XS,XL),(YS,YL)])
+    x_origin=_cuso_origin(XS,XL,upper_segments,upper_low_variables,upper_all_variables)
+    y_origin=_cuso_origin(YS,YL,upper_segments,upper_low_variables,upper_all_variables)
+    print(f'grouped variable origins: x={x_origin} y={y_origin}', flush=True)
     def get(root,k):
         for kk in (k,str(k)):
             try:
@@ -108,7 +135,15 @@ def cuso_run(a,b,cuso_log=None,use_graph_optimization=None,use_intermediate_size
         lo,hi=cid&15,cid>>4
         C=BASE | (lo<<150) | (hi<<920)
         print(f'try cid={cid:03d} lo={lo:x} hi={hi:x}', flush=True)
-        f=C + A*x + B*y
+        f=C
+        if x_origin=='upper':
+            f += A*(X-1) - A*x
+        else:
+            f += A*x
+        if y_origin=='upper':
+            f += B*(Y-1) - B*y
+        else:
+            f += B*y
         t0=time.time()
         roots=cuso_find_small_roots_compat(
             cuso,
@@ -126,6 +161,10 @@ def cuso_run(a,b,cuso_log=None,use_graph_optimization=None,use_intermediate_size
             else:
                 xv,yv=get(r,x),get(r,y)
                 if xv is None or yv is None: continue
+                if x_origin=='upper':
+                    xv=(X-1)-xv
+                if y_origin=='upper':
+                    yv=(Y-1)-yv
                 p=C + (xv<<XS) + (yv<<YS)
             if testp(p): return 0
     print('not found')
@@ -162,6 +201,9 @@ def cuso_split_run(
     brute_small_edges=False,
     edge_start=0,
     edge_stop=None,
+    upper_variables=None,
+    upper_low_variables=False,
+    upper_all_variables=False,
 ):
     if cuso_log:
         import logging
@@ -179,8 +221,19 @@ def cuso_split_run(
     names=[f'x{i}' for i in range(len(blocks))]
     R=PolynomialRing(ZZ, names)
     gens=R.gens()
+    model_segments=[(start,width) for start,_,width in blocks]
+    upper_segments=_parse_cuso_upper_segments(upper_variables, model_segments)
+    origins=[
+        _cuso_origin(start,width,upper_segments,upper_low_variables,upper_all_variables)
+        for start,_,width in blocks
+    ]
     bounds={}
     print('split blocks:', ', '.join(f'{start}:{width}' for start,_,width in blocks), flush=True)
+    print(
+        'split variable origins:',
+        ', '.join(f'{start}:{width}={origin}' for (start,_,width),origin in zip(blocks,origins)),
+        flush=True,
+    )
     if fixed_edge_blocks:
         print('bruteforced edge blocks:', ', '.join(f'{start}:{width}' for start,_,width in fixed_edge_blocks), flush=True)
     print('unknown bits in split model =', sum(width for _,_,width in blocks), flush=True)
@@ -200,8 +253,12 @@ def cuso_split_run(
             print('try edges', edge_id, ','.join(edge_parts), flush=True)
         f=R(base)
         bounds={}
-        for gen,(start,_,width) in zip(gens,blocks):
-            f += R(1<<start)*gen
+        for gen,(start,_,width),origin in zip(gens,blocks,origins):
+            coeff=R(1<<start)
+            if origin=='upper':
+                f += coeff*((1<<width)-1) - coeff*gen
+            else:
+                f += coeff*gen
             bounds[gen]=(0,1<<width)
         t0=time.time()
         roots=cuso_find_small_roots_compat(
@@ -223,7 +280,7 @@ def cuso_split_run(
             else:
                 p=base
                 ok=True
-                for gen,(start,_,_) in zip(gens,blocks):
+                for gen,(start,_,width),origin in zip(gens,blocks,origins):
                     val=None
                     for kk in (gen,str(gen)):
                         try:
@@ -235,6 +292,8 @@ def cuso_split_run(
                     if val is None:
                         ok=False
                         break
+                    if origin=='upper':
+                        val=(1<<width)-1-val
                     p += val<<start
                 if not ok:
                     continue
@@ -335,6 +394,9 @@ if __name__=='__main__':
     ap.add_argument('--cuso-no-intermediate',action='store_true')
     ap.add_argument('--cuso-allow-partial',action='store_true')
     ap.add_argument('--cuso-split-brute-small-edges',action='store_true')
+    ap.add_argument('--cuso-upper-variable',action='append',default=[],help='model variable START:WIDTH to use upper origin')
+    ap.add_argument('--cuso-upper-low-variables',action='store_true',help='use upper origin for model variables ending before bit 600')
+    ap.add_argument('--cuso-upper-all-variables',action='store_true',help='use upper origin for every cuso model variable')
     args=ap.parse_args()
     if args.mode=='analyze': analyze(); sys.exit(0)
     if args.mode=='decrypt': sys.exit(decrypt_known(args.phex or '0'))
@@ -348,10 +410,23 @@ if __name__=='__main__':
             args.cuso_split_brute_small_edges,
             args.a,
             args.b,
+            args.cuso_upper_variable,
+            args.cuso_upper_low_variables,
+            args.cuso_upper_all_variables,
         ))
     if args.mode in ('auto','cuso'):
         graph=None if args.cuso_graph=='auto' else args.cuso_graph=='on'
-        try: sys.exit(cuso_run(args.a,args.b,args.cuso_log,graph,not args.cuso_no_intermediate,args.cuso_allow_partial))
+        try: sys.exit(cuso_run(
+            args.a,
+            args.b,
+            args.cuso_log,
+            graph,
+            not args.cuso_no_intermediate,
+            args.cuso_allow_partial,
+            args.cuso_upper_variable,
+            args.cuso_upper_low_variables,
+            args.cuso_upper_all_variables,
+        ))
         except Exception as ex:
             if args.mode=='cuso': raise
             print('cuso unavailable/fail:',type(ex).__name__,ex,'=> local fallback')

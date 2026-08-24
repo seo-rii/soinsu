@@ -21,17 +21,44 @@ sudo apt-get install -y git build-essential python3-pip sagemath
 # Install flatter and msolve according to your OS/package manager.
 # If packages are unavailable, build them from their upstream repositories.
 
-# Install cuso into the Sage Python environment.
-git clone https://github.com/keeganryan/cuso.git
-cd cuso
-sage -pip install .
+# Install cuso into a project-local Sage Python target.  This avoids system
+# site-packages and works without sudo.
+cd /path/to/rsa_partial_leak_assets
+mkdir -p .sage-tmp .sage-site
+DOT_SAGE="$PWD/.sage-tmp" sage -pip install --target "$PWD/.sage-site" \
+  git+https://github.com/keeganryan/cuso.git
 ```
 
 Then run from this asset package root:
 
 ```bash
-sage -python src/solve7_main.py --mode analyze
-sage -python src/solve7_main.py --mode cuso --a 0 --b 256 | tee logs/cuso_full.log
+DOT_SAGE="$PWD/.sage-tmp" PYTHONPATH="$PWD/.sage-site${PYTHONPATH:+:$PYTHONPATH}" \
+  sage -python src/solve7_main.py --mode analyze
+DOT_SAGE="$PWD/.sage-tmp" PYTHONPATH="$PWD/.sage-site${PYTHONPATH:+:$PYTHONPATH}" \
+  sage -python src/solve7_main.py --mode cuso --a 0 --b 256 | tee logs/cuso_full.log
+```
+
+The bundled shell runners set these two environment variables automatically.
+Set `CUSO_TIMEOUT=<seconds>` when smoke-running shapes so a single difficult
+candidate cannot capture the machine indefinitely:
+
+```bash
+CUSO_TIMEOUT=180 bash scripts/smoke_cuso_modes.sh logs/smoke_180s
+CUSO_TIMEOUT=180 bash scripts/smoke_mixed_shape_cuso.sh logs/mixed_180s
+CUSO_TIMEOUT=60s bash scripts/run_cuso_option_sweep.sh logs/options_60s
+CUSO_TIMEOUT=30s PLANTED_BITS_LIST='64 96 128' \
+  bash scripts/run_planted_cuso_scale_sweep.sh logs/planted_scale_sweep
+```
+
+For the programmatic SAT+CAS scaffold, install PySAT into a project-local
+Python target:
+
+```bash
+cd /path/to/rsa_partial_leak_assets
+mkdir -p .py-site
+python3 -m pip install --target .py-site 'python-sat[pblib,aiger]>=1.8.dev13'
+PYTHONPATH="$PWD/.py-site${PYTHONPATH:+:$PYTHONPATH}" \
+  python3 experiments/programmatic_low600_sat_cas.py --mode self-test
 ```
 
 ## Parallel candidate splitting
